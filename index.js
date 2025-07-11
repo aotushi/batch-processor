@@ -100,6 +100,39 @@ class BatchProcessor {
     ];
 
     const answers = await inquirer.prompt(questions);
+    
+    // 计算总的站点创建数量
+    const totalSitesToCreate = config.domains.length * (1 + answers.subdomainCount);
+    
+    // 循环验证起始项目名称直到没有冲突
+    let startingSiteName;
+    while (true) {
+      const nameQuestion = {
+        type: "input",
+        name: "startingSiteName",
+        message: `请输入起始项目名称 (将创建${totalSitesToCreate}个项目, 例如: site47):`,
+        validate: (input) => {
+          if (!input.trim()) return "名称不能为空.";
+          if (!/site\d+$/.test(input)) return '项目名称必须以 "site" 和数字结尾 (例如: site47).';
+          return true;
+        },
+      };
+      
+      const nameAnswer = await inquirer.prompt([nameQuestion]);
+      startingSiteName = nameAnswer.startingSiteName;
+      
+      // 检查项目名称冲突
+      const conflicts = await this.validateProjectNames(startingSiteName, totalSitesToCreate);
+      if (conflicts.length === 0) {
+        break;
+      } else {
+        console.log(`\n❌ 以下文件夹已经存在，请重新输入起始项目名称:`);
+        conflicts.forEach(name => console.log(`   - ${name}`));
+        console.log("");
+      }
+    }
+    
+    answers.startingSiteName = startingSiteName;
 
         // 动态搜索模板文件夹
     const foundPath = await this.findTemplatePath(this.workspaceRoot, answers.templateName);
@@ -107,11 +140,19 @@ class BatchProcessor {
       throw new Error(`在工作区 ${this.workspaceRoot} 或其父目录中未找到名为 '${answers.templateName}' 的模板文件夹.`);
     }
     
-    // 校验模板 games.json 数量
+    // 校验模板 games.json 数量，并过滤html5游戏
     const gamesJsonPath = path.join(foundPath, "data/games.json");
     const gamesData = await fs.readJson(gamesJsonPath);
-    if (gamesData.length < answers.gamesMax) {
-      throw new Error(`模板 games.json 数量不足 (共${gamesData.length}项), 不能满足最大需求 ${answers.gamesMax}`);
+    
+    // 过滤出包含html5标签的游戏
+    const html5Games = gamesData.games ? gamesData.games.filter(game => 
+      Array.isArray(game.tags) && game.tags.includes("html5")
+    ) : [];
+    
+    console.log(`\n🎯 html5游戏过滤结果: 原始${gamesData.games?.length || 0}个游戏 -> 过滤后${html5Games.length}个html5游戏`);
+    
+    if (html5Games.length < answers.gamesMax) {
+      throw new Error(`模板中html5游戏数量不足 (共${html5Games.length}个html5游戏), 不能满足最大需求 ${answers.gamesMax}`);
     }
 
     answers.templatePath = foundPath;
@@ -175,18 +216,34 @@ class BatchProcessor {
 
   extractSiteNumber(siteName) {
     const match = siteName.match(/(\d+)$/);
-    if (!match) throw new Error(`无法从模板名称 "${siteName}" 中提取站点编号.`);
+    if (!match) throw new Error(`无法从站点名称 "${siteName}" 中提取站点编号.`);
     return parseInt(match[1]);
   }
 
-  async generateProjects({ templatePath, subdomainCount, prefixLength, gamesMin, gamesMax }) {
+  async validateProjectNames(startingSiteName, totalSitesToCreate) {
+    const baseNumber = this.extractSiteNumber(startingSiteName);
+    const conflicts = [];
+    
+    for (let i = 0; i < totalSitesToCreate; i++) {
+      const projectName = `site${baseNumber + i}`;
+      const projectPath = path.join(this.workspaceRoot, projectName);
+      
+      if (await fs.pathExists(projectPath)) {
+        conflicts.push(projectName);
+      }
+    }
+    
+    return conflicts;
+  }
+
+  async generateProjects({ templatePath, startingSiteName, subdomainCount, prefixLength, gamesMin, gamesMax }) {
     const templateName = path.basename(templatePath);
-    const baseNumber = this.extractSiteNumber(templateName);
+    const baseNumber = this.extractSiteNumber(startingSiteName);
 
     const totalSitesToCreate = config.domains.length * (1 + subdomainCount);
-    console.log(`\n📁 根据模板 ${templateName}, 总计将创建 ${totalSitesToCreate} 个新站点...`);
+    console.log(`\n📁 根据模板 ${templateName}, 从 ${startingSiteName} 开始，总计将创建 ${totalSitesToCreate} 个新站点...`);
 
-    let siteNumberCounter = baseNumber;
+    let siteNumberCounter = baseNumber - 1; // 减1是因为循环中会先递增
     let siteIndex = 0;
 
     const allDomains = [];
@@ -222,8 +279,7 @@ class BatchProcessor {
       console.log(`  -> 正在创建项目: ${projectName}`);
 
       if (await fs.pathExists(projectPath)) {
-        console.warn(`  ⚠️  警告: 项目文件夹 ${projectName} 已存在, 将跳过.`);
-        continue;
+        throw new Error(`项目文件夹 ${projectName} 已存在，这不应该发生（预检查应该已捕获）。请检查实现。`);
       }
 
       console.log(`     分配域名: ${newDomain}`);
@@ -281,12 +337,27 @@ class BatchProcessor {
     try {
       let gamesData = await fs.readJson(gamesPath);
       if (Array.isArray(gamesData.games)) {
-        // 洗牌
-        for (let i = gamesData.games.length - 1; i > 0; i--) {
-          const j = Math.floor(Math.random() * (i + 1));
-          [gamesData.games[i], gamesData.games[j]] = [gamesData.games[j], gamesData.games[i]];
+        // 首先过滤出包含html5标签的游戏
+        const html5Games = gamesData.games.filter(game => 
+          Array.isArray(game.tags) && game.tags.includes("html5")
+        );
+        
+        console.log(`     🎯 过滤html5游戏: ${gamesData.games.length} -> ${html5Games.length}个`);
+        
+        if (html5Games.length < gamesCount) {
+          console.warn(`     ⚠️  html5游戏数量(${html5Games.length})小于需求(${gamesCount})，将使用所有可用的html5游戏`);
         }
-        gamesData.games = gamesData.games.slice(0, gamesCount);
+        
+        // 对html5游戏进行洗牌
+        for (let i = html5Games.length - 1; i > 0; i--) {
+          const j = Math.floor(Math.random() * (i + 1));
+          [html5Games[i], html5Games[j]] = [html5Games[j], html5Games[i]];
+        }
+        
+        // 取前gamesCount个游戏（或所有可用的html5游戏）
+        gamesData.games = html5Games.slice(0, gamesCount);
+        
+        console.log(`     ✅ 最终选择了 ${gamesData.games.length} 个html5游戏`);
       }
       await fs.writeJson(gamesPath, gamesData, { spaces: 2 });
     } catch (error) {

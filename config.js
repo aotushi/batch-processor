@@ -3,10 +3,6 @@ export const config = {
   domains: [
     'game92.vip'
   ],
-
-  // domainsToSiteName: {
-  //   'game92.com': 'site47'
-  // },
   
   // GitHub用户名或组织名
   githubUsername: 'wjspark',
